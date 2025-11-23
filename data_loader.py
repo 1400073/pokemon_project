@@ -1,23 +1,42 @@
 # data_loader.py
-from typing import Dict, List
+from pathlib import Path
+from typing import Dict, List, Optional
+import json
 import pandas as pd
-
+from trainer_data import TrainerDex, Trainer
 # Define data structures for moves and Pokemon
 class MoveData:
-    __slots__ = ("name", "type", "category", "power", "accuracy", "pp", 
-                 "effect_chance", "priority", "multihit", "target_def_halved")
-    def __init__(self, name: str, type: str, category: str, power: int, accuracy: int, pp: int,
-                 effect_chance: int = 0, priority: int = 0, multihit: tuple = (1, 1), target_def_halved: bool = False):
+    __slots__ = (
+        "name", "type", "category", "power", "accuracy", "pp",
+        "effect_chance", "priority", "multihit", "target_def_halved",
+        "has_secondary",
+    )
+
+    def __init__(
+        self,
+        name: str,
+        type: str,
+        category: str,
+        power: int,
+        accuracy: int,
+        pp: int,
+        effect_chance: int = 0,
+        priority: int = 0,
+        multihit: tuple = (1, 1),
+        target_def_halved: bool = False,
+        has_secondary: bool = False,
+    ):
         self.name = name
-        self.type = type            # e.g. "Fire", "Water"
-        self.category = category    # "Physical", "Special", or "Status"
-        self.power = power          # base power (0 for status moves)
-        self.accuracy = accuracy    # accuracy percentage or None if can't miss
+        self.type = type
+        self.category = category
+        self.power = power
+        self.accuracy = accuracy
         self.pp = pp
-        self.effect_chance = effect_chance  # chance (percentage) of secondary effect
-        self.priority = priority    # priority bracket (e.g. +1, -1)
-        self.multihit = multihit    # tuple (min_hits, max_hits)
-        self.target_def_halved = target_def_halved  # True for Explosion/Self-Destruct
+        self.effect_chance = effect_chance
+        self.priority = priority
+        self.multihit = multihit
+        self.target_def_halved = target_def_halved
+        self.has_secondary = has_secondary
 
 class PokemonData:
     __slots__ = ("name", "types", "base_stats", "abilities")
@@ -27,64 +46,108 @@ class PokemonData:
         self.base_stats = base_stats    # dict with keys "HP","Atk","Def","SpA","SpD","Spe"
         self.abilities = abilities      # list of possible abilities
 
-# Load move data from Run & Bun data files
+MOVES_BASE_PATH = Path(__file__).with_name("moves_base.json")
+
+
 def load_moves() -> Dict[str, MoveData]:
     moves: Dict[str, MoveData] = {}
-    # Load base move data (from a Moves list or CSV – not provided directly in user files)
-    # Here we assume we have a CSV or JSON of all move data to start with.
-    base_moves_df = pd.DataFrame()  # placeholder for base move data
-    # If we had 'Moves.txt', we would parse it. For now, assume base_moves_df is populated.
-    # Apply the Move Changes from Move Changes.xlsx:
-    changes_df = pd.read_excel("Move Changes.xlsx")
-    # The sheet has two sections; we separate numeric changes and effect changes.
-    # Process numeric changes (power, accuracy, PP, type changes):
-    for idx, row in changes_df.iterrows():
+
+    try:
+        base_raw = json.loads(MOVES_BASE_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        base_raw = {}
+
+    for name, m in base_raw.items():
+        moves[name] = MoveData(
+            name=name,
+            type=m["type"],
+            category=m["category"],
+            power=int(m["power"]),
+            accuracy=int(m["accuracy"]),
+            pp=int(m["pp"]),
+            has_secondary=bool(m.get("has_secondary", False)),
+        )
+
+    base_rows = []
+    for name, m in base_raw.items():
+        base_rows.append(
+            {
+                "Name": name,
+                "Type": m["type"],
+                "Category": m["category"],
+                "Power": int(m["power"]),
+                "Accuracy": f'{m["accuracy"]}',
+                "PP": int(m["pp"]),
+            }
+        )
+    base_moves_df = pd.DataFrame(base_rows)
+
+    try:
+        changes_df = pd.read_excel("Move Changes.xlsx")
+    except FileNotFoundError:
+        return moves
+
+    for _, row in changes_df.iterrows():
         move_name = str(row["Move"]) if pd.notna(row["Move"]) else None
         move_name_2 = str(row["Move.1"]) if pd.notna(row["Move.1"]) else None
+
         if move_name and move_name != "None":
-            # numeric change entry
             if move_name not in moves:
-                # initialize from base data if not already set
-                # For simplicity, fill with base data or defaults
-                base = base_moves_df[base_moves_df["Name"] == move_name].iloc[0] if not base_moves_df.empty else None
-                moves[move_name] = MoveData(
-                    name=move_name,
-                    type = base["Type"] if base is not None else "Normal",
-                    category = base["Category"] if base is not None else "Physical",
-                    power = int(base["Power"]) if base is not None else 0,
-                    accuracy = int(base["Accuracy"]) if base is not None else 100,
-                    pp = int(base["PP"]) if base is not None else 0
-                )
-            # Apply any changes present
+                base_row_df = base_moves_df[base_moves_df["Name"] == move_name]
+                base = base_row_df.iloc[0] if not base_row_df.empty else None
+
+                if base is not None:
+                    moves[move_name] = MoveData(
+                        name=move_name,
+                        type=base["Type"],
+                        category=base["Category"],
+                        power=int(base["Power"]),
+                        accuracy=int(str(base["Accuracy"]).rstrip("%")),
+                        pp=int(base["PP"]),
+                    )
+                else:
+                    moves[move_name] = MoveData(
+                        name=move_name,
+                        type="Normal",
+                        category="Physical",
+                        power=0,
+                        accuracy=100,
+                        pp=0,
+                    )
+
             if pd.notna(row["BP"]):
-                # format like "90 > 95"
-                new_bp = row["BP"].split(">")[-1].strip()
+                new_bp = str(row["BP"]).split(">")[-1].strip()
                 moves[move_name].power = int(new_bp)
+
             if pd.notna(row["Accuracy"]):
-                new_acc = row["Accuracy"].split(">")[-1].strip().rstrip("%")
+                new_acc = str(row["Accuracy"]).split(">")[-1].strip().rstrip("%")
                 moves[move_name].accuracy = int(new_acc)
+
             if pd.notna(row["PP"]):
-                new_pp = row["PP"].split(">")[-1].strip()
+                new_pp = str(row["PP"]).split(">")[-1].strip()
                 moves[move_name].pp = int(new_pp)
+
             if pd.notna(row["Type"]):
-                # e.g. "Normal > Fairy"
-                new_type = row["Type"].split(">")[-1].strip()
+                new_type = str(row["Type"]).split(">")[-1].strip()
                 moves[move_name].type = new_type
+
         if move_name_2 and move_name_2 != "None":
-            # effect change entry
             change_desc = str(row["Change"])
-            # We look for known phrases:
             if "Halves target's defense" in change_desc:
-                # Mark this move to halve target defense
                 mname = move_name_2
                 if mname not in moves:
-                    # initialize if not exists in base
-                    moves[mname] = MoveData(name=mname, type="Normal", category="Physical", 
-                                             power=0, accuracy=100, pp=0)
+                    moves[mname] = MoveData(
+                        name=mname,
+                        type="Normal",
+                        category="Physical",
+                        power=0,
+                        accuracy=100,
+                        pp=0,
+                    )
                 moves[mname].target_def_halved = True
-            # Other effect changes (Covet/Thief no item steal, etc.) 
-            # can be noted if needed, but they don't affect damage directly.
+
     return moves
+
 
 # Load Pokémon data (base stats, types, abilities) from provided text file
 def load_pokemon() -> Dict[str, PokemonData]:
@@ -149,3 +212,23 @@ def load_trainers():
             trainers[tname] = []
         trainers[tname].append((mon_name, level, moves))
     return trainers
+
+_TRAINER_DEX: Optional[TrainerDex] = None
+TRAINER_DATA_JSON_PATH = "trainer_data.json"
+
+
+def get_trainer_dex(path: str = TRAINER_DATA_JSON_PATH) -> TrainerDex:
+    global _TRAINER_DEX
+    if _TRAINER_DEX is None:
+        _TRAINER_DEX = TrainerDex.from_json(path)
+    return _TRAINER_DEX
+
+
+def get_trainer_by_id(trainer_id: str, path: str = TRAINER_DATA_JSON_PATH) -> Trainer:
+    dex = get_trainer_dex(path)
+    return dex.get(trainer_id)
+
+
+def get_trainers_by_name(name: str, path: str = TRAINER_DATA_JSON_PATH):
+    dex = get_trainer_dex(path)
+    return dex.find_by_name(name)

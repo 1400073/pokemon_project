@@ -1,6 +1,6 @@
 # damage.py
 import math
-from typing import Tuple, List, Dict
+from typing import Tuple, List, Dict, Optional
 from state import PokemonState, FieldState
 from data_loader import MoveData
 
@@ -41,10 +41,34 @@ def type_effectiveness(move_type: str, target_types: List[str], field: FieldStat
         eff *= 0.5
     return eff
 
-def calculate_damage(attacker: PokemonState, defender: PokemonState, move: MoveData, field: FieldState) -> Tuple[int,int]:
-    """Return the possible damage range (min_damage, max_damage) for one hit of the move."""
+def calculate_damage(
+    attacker: PokemonState,
+    defender: PokemonState,
+    move: MoveData,
+    field: FieldState,
+    attacker_side_idx: Optional[int] = None,
+    defender_side_idx: Optional[int] = None,
+    targets: int = 1,
+) -> Tuple[int, int]:
     if move.power == 0 and move.category == "Status":
-        return (0, 0) 
+        return (0, 0)
+
+    if defender_side_idx is None and attacker_side_idx is not None:
+        defender_side_idx = 1 - attacker_side_idx
+    if defender_side_idx is None:
+        defender_side_idx = 1
+
+    targets = max(1, targets or 1)
+
+    if (
+        defender.ability == "Disguise"
+        and not defender.volatiles.get("disguise_busted", False)
+        and move.category != "Status"
+        and move.power > 0
+    ):
+        defender.volatiles["disguise_busted"] = True
+        return (0, 0)
+
     name = move.name.lower()
     if name in ["seismic toss", "night shade"]:
         dmg = attacker.level
@@ -66,16 +90,21 @@ def calculate_damage(attacker: PokemonState, defender: PokemonState, move: MoveD
     if move.category == "Physical":
         A = attacker.calc_stat("Atk")
         D = defender.calc_stat("Def")
-        # Burn halves physical Attack (if not Guts/Facade)
-        if attacker.status == "brn" and attacker.ability != "Guts" and move.name not in ["Facade"]:
-            A = A // 2 
+        if attacker.status == "brn" and attacker.ability != "Guts" and move.name != "Facade":
+            A = max(1, A // 2)
+        if attacker.ability == "Guts" and attacker.status is not None:
+            A = A * 3 // 2
     elif move.category == "Special":
         A = attacker.calc_stat("SpA")
         D = defender.calc_stat("SpD")
+
+        if attacker.ability == "Solar Power" and field.has_weather("Sun"):
+            A = int(A * 1.5)
+
+        if field.has_weather("Sandstorm") and "Rock" in defender.types and move.name not in ("Psyshock", "Psystrike", "Secret Sword"):
+            D = D * 3 // 2
     else:
         return (0, 0)
-    # Apply ability overrides for using different stats
-    # e.g. Foul Play uses target's Attack
     if move.name == "Foul Play":
         A = defender.calc_stat("Atk")
     if move.name in ["Psyshock", "Secret Sword", "Psychic Shell"]:  # example alt moves
@@ -136,28 +165,24 @@ def calculate_damage(attacker: PokemonState, defender: PokemonState, move: MoveD
             terrain_boost = 1.5
         elif field.terrain == "Psychic" and move.type == "Psychic":
             terrain_boost = 1.5
-    # Spread move?
-    spread_modifier = 1.0
-    # (In double battles, determine if move hits multiple targets)
-    # We'll assume if it's a known spread move and in doubles with 2 targets alive:
-    # spread_modifier = 0.75:contentReference[oaicite:90]{index=90}
-    # Reflect/Light Screen:
+    spread_modifier = 0.75 if targets > 1 else 1.0
+
+    is_doubles = field.game_type.lower().startswith("double") if hasattr(field, "game_type") and field.game_type else False
+    doubles_screen_ratio = 2 / 3 if is_doubles else 0.5
     screen_modifier = 1.0
-    # Determine which side is defender's side (player or opp) and if screen is up
-    # If not a crit and attacker doesn't have Infiltrator:
-    # For simplicity, let's assume defender is on index 1 (opponent) for now.
-    # In actual code, we'd pass side indices.
-    if move.category == "Physical":
-        if field.aurora_veil[1] or field.reflect[1]:
-            screen_modifier = 0.5 if not crit else 1.0
-            if len(defender.types) > 1:  # if double battle only one opponent, use 0.5, if multiple, use 2/3
-                # Actually, rule: if more than one Pokémon on defender side when move is executed in doubles:
-                screen_modifier = (2/3) if not crit else 1.0
-    elif move.category == "Special":
-        if field.aurora_veil[1] or field.light_screen[1]:
-            screen_modifier = 0.5 if not crit else 1.0
-            if len(defender.types) > 1:
-                screen_modifier = (2/3) if not crit else 1.0
+    ignore_screens = attacker.ability == "Infiltrator"
+    idx = max(0, min(len(field.reflect) - 1, defender_side_idx)) if field.reflect else defender_side_idx
+    if not ignore_screens:
+        veil_active = bool(field.aurora_veil and field.aurora_veil[idx])
+        reflect_active = bool(field.reflect and field.reflect[idx])
+        light_active = bool(field.light_screen and field.light_screen[idx])
+        reduction = doubles_screen_ratio
+        if veil_active:
+            screen_modifier = reduction
+        elif move.category == "Physical" and reflect_active:
+            screen_modifier = reduction
+        elif move.category == "Special" and light_active:
+            screen_modifier = reduction
     # Ability modifiers:
     ability_mod = 1.0
     # Defender abilities:
